@@ -1,0 +1,188 @@
+# .github/dependabot.yml
+
+version: 2
+registries:
+  docker-hub:
+    type: docker-registry
+    url: registry.hub.docker.com
+    username: ${{vars.DOCKERHUB_USERNAME}}
+    password: ${{secrets.DOCKERHUB_TOKEN}}
+  private-nexus:
+    type: maven-repository
+    url: https://nexus.kuva.ai/repository/maven-public
+    username: ${{vars.NEXUS_USER}}
+    password: ${{secrets.NEXUS_TOKEN}}
+
+updates:
+  # Core Application Dependencies
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "03:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "python"
+    assignees:
+      - "core-team"
+    reviewers:
+      - "security-team"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    versioning-strategy: increase-if-necessary
+    open-pull-requests-limit: 15
+    allowed-updates:
+      - match:
+          dependency-type: "all"
+          update-type: "security"
+        dependency-name: "*"
+      - match:
+          dependency-type: "production"
+          update-type: "all"
+        dependency-name: "*"
+    ignore:
+      - dependency-name: "tensorflow"
+        versions: ["2.x"]
+      - dependency-name: "pandas"
+        update-types: ["version-update:semver-major"]
+    registries:
+      - "private-nexus"
+
+  # Infrastructure as Code
+  - package-ecosystem: "docker"
+    directory: "/docker"
+    schedule:
+      interval: "weekly"
+      time: "08:00"
+    labels:
+      - "infra"
+      - "security"
+    pull-request-branch-name-separator: "-"
+    rebase-strategy: "disabled"
+    versioning-strategy: lockfile-only
+    ignore:
+      - dependency-name: "redis:*"
+      - dependency-name: "postgres:*"
+        versions: ["13.*", "14.*"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/.github/workflows"
+    schedule:
+      interval: "daily"
+    insecure-external-code-execution: "allow"
+    commit-message:
+      prefix: "ci"
+      prefix-development: false
+    allowed-updates:
+      - match:
+          dependency-type: "direct"
+          update-type: "all"
+
+  # Cloud Provisioning
+  - package-ecosystem: "terraform"
+    directory: "/infra/terraform"
+    schedule:
+      interval: "weekly"
+    version-constraint-update-strategy: "increase_allow_only"
+    auto-merge:
+      enabled: true
+      schedule: "after_1am_weekends"
+      requires-pipeline-status: true
+    reviewers:
+      - "cloud-ops"
+
+  # Frontend Dependencies
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "daily"
+      day: "tuesday"
+    labels:
+      - "javascript"
+      - "web"
+    versioning-strategy: "widen-ranges"
+    ignore:
+      - dependency-name: "react"
+        versions: ["18.x"]
+      - dependency-name: "webpack"
+        update-types: ["version-update:semver-major"]
+
+  # Kubernetes Ecosystem
+  - package-ecosystem: "helm"
+    directory: "/charts"
+    schedule:
+      interval: "monthly"
+    versioning-strategy: "strict"
+    allowed-updates:
+      - match:
+          dependency-type: "direct"
+          update-type: "security"
+
+  # Security Patches (Emergency Updates)
+  - package-ecosystem: "*"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      update-types: ["security"]
+    labels:
+      - "security"
+      - "emergency"
+    priority: "high"
+    pull-request-title-pattern: "[SECURITY] Update %s"
+    auto-merge:
+      enabled: true
+      when-conditions:
+        - "label=security-approval"
+        - "status-success=security-scan"
+      merge-strategy: "squash"
+    signature-commit:
+      enabled: true
+      gpg-key: ${{secrets.GPG_SIGNING_KEY}}
+
+  # Documentation Dependencies
+  - package-ecosystem: "gitsubmodule"
+    directory: "/docs"
+    schedule:
+      interval: "monthly"
+    labels:
+      - "documentation"
+
+# Global Configuration
+update-configs:
+  default-commit-message:
+    prefix: "chore"
+    include-scope: true
+  auto-merge-defaults:
+    batch-size: 5
+    merge-delay: 300
+    requires-approvals: 1
+  security:
+    alerts-threshold: "moderate"
+    assign-to-code-owners: true
+    create-issues-for-ignored: true
+  notifications:
+    webhooks:
+      - url: ${{secrets.SLACK_DEPENDABOT_WEBHOOK}}
+        events: ["pull_request", "security_alert"]
+    email:
+      - "devops@kuva.ai"
+  version-ranges:
+    respect-pessimistic: true
+    ignore-pre-releases: true
+    max-upgrade-stride:
+      major: 1
+      minor: 2
+      patch: 3
+  license-compliance:
+    allow-licenses:
+      - "MIT"
+      - "Apache-2.0"
+      - "BSD-3-Clause"
+    deny-licenses:
+      - "GPL-*"
+      - "AGPL-*"
+    override-licenses:
+      - dependency-name: "some-library"
+        allowed: ["Proprietary"]
