@@ -1,0 +1,15 @@
+# kuva-ai/charts/Chart.yaml
+apiVersion: v2
+name: kuva-ai
+description: Enterprise AI Agent Orchestration Platform
+version: 2.8.0
+appVersion: "2.0"
+dependencies:
+  - name: redis
+    version: 17.0.0
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled
+  - name: postgresql
+    version: 13.0.0
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled
