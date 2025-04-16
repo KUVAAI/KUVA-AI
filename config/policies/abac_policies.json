@@ -1,0 +1,287 @@
+{
+  "PolicyVersion": "2024-09-01",
+  "Description": "KUVA AI ABAC Policies for Zero-Trust Multi-Agent Framework",
+  
+  "AttributeSources": [
+    {
+      "Type": "JWT",
+      "Issuer": "https://auth.kuva.ai",
+      "JWKSURL": "https://auth.kuva.ai/.well-known/jwks.json",
+      "Claims": ["department", "clearance_level", "geo_region"]
+    },
+    {
+      "Type": "HTTPHeader",
+      "Names": ["X-Kuva-Client-Type", "X-Kuva-Env"]
+    },
+    {
+      "Type": "ResourceTag",
+      "ResourceTypes": ["agent", "dataset", "model"],
+      "Tags": ["classification", "owner_team", "retention_period"]
+    }
+  ],
+
+  "PolicyDefinitions": [
+    {
+      "PolicyId": "KUVA-ABAC-001",
+      "Description": "Developer Access to Non-Prod Agents",
+      "Target": {
+        "Actions": ["agent:Create", "agent:Update", "agent:Delete"],
+        "Resources": ["arn:kuva:agent:*:*"]
+      },
+      "Rules": [
+        {
+          "RuleId": "DEV-AGENT-MODIFY",
+          "Condition": {
+            "AllOf": [
+              {
+                "Attribute": "user.department",
+                "Operator": "StringEquals",
+                "Value": "ai-engineering"
+              },
+              {
+                "Attribute": "resource.Tag:env",
+                "Operator": "StringNotEquals",
+                "Value": "prod"
+              },
+              {
+                "Attribute": "time:Range",
+                "Operator": "TimeBetween",
+                "Value": "09:00-17:00/US/Pacific"
+              },
+              {
+                "Attribute": "network:IP",
+                "Operator": "IPInRange",
+                "Value": "10.0.0.0/16"
+              }
+            ]
+          },
+          "Effect": "Permit",
+          "Obligations": [
+            {
+              "Type": "MFA",
+              "Requirement": "HardwareToken"
+            },
+            {
+              "Type": "SessionDuration",
+              "MaxSeconds": 3600
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "PolicyId": "KUVA-ABAC-002",
+      "Description": "Cross-Team Agent Collaboration",
+      "Target": {
+        "Actions": ["agent:Invoke", "agent:Share"],
+        "Resources": ["arn:kuva:agent:*:*"]
+      },
+      "Rules": [
+        {
+          "RuleId": "CROSS-TEAM-ACCESS",
+          "Condition": {
+            "AnyOf": [
+              {
+                "AllOf": [
+                  {
+                    "Attribute": "user.clearance_level",
+                    "Operator": "NumberGreaterThanOrEquals",
+                    "Value": 3
+                  },
+                  {
+                    "Attribute": "resource.Tag:classification",
+                    "Operator": "StringEquals",
+                    "Value": "internal"
+                  }
+                ]
+              },
+              {
+                "AllOf": [
+                  {
+                    "Attribute": "user.attributes:project_id",
+                    "Operator": "StringEquals",
+                    "Value": "{{resource.Tag:allowed_projects}}"
+                  },
+                  {
+                    "Attribute": "request:Reason",
+                    "Operator": "StringRegexMatch",
+                    "Value": "/^[A-Z]{3}-\\d+$/"
+                  }
+                ]
+              }
+            ]
+          },
+          "Effect": "Permit",
+          "Obligations": [
+            {
+              "Type": "Logging",
+              "Fields": ["user.id", "resource.id", "request.reason"]
+            },
+            {
+              "Type": "Approval",
+              "RequiredSigners": 2,
+              "ApprovalGroups": ["ai-governance-team"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "PolicyId": "KUVA-ABAC-003",
+      "Description": "Emergency Data Export Override",
+      "Target": {
+        "Actions": ["data:Export"],
+        "Resources": ["arn:kuva:dataset:*:*"]
+      },
+      "Rules": [
+        {
+          "RuleId": "BREAKGLASS-EXPORT",
+          "Condition": {
+            "AllOf": [
+              {
+                "Attribute": "user.roles",
+                "Operator": "StringEquals",
+                "Value": "incident_manager"
+              },
+              {
+                "Attribute": "context:EmergencyLevel",
+                "Operator": "NumberEquals",
+                "Value": 1
+              }
+            ]
+          },
+          "Effect": "Permit",
+          "Obligations": [
+            {
+              "Type": "Notification",
+              "Channels": ["slack#security-alerts", "sms:+15551234"]
+            },
+            {
+              "Type": "PostActionReview",
+              "Reviewers": ["cto", "security-director"],
+              "MaxHours": 24
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "PolicyId": "KUVA-ABAC-004",
+      "Description": "AI Model Training Access",
+      "Target": {
+        "Actions": ["model:Train", "model:Evaluate"],
+        "Resources": ["arn:kuva:model:*:*"]
+      },
+      "Rules": [
+        {
+          "RuleId": "TRAINING-ACCESS",
+          "Condition": {
+            "AllOf": [
+              {
+                "Attribute": "device:SecurityPosture",
+                "Operator": "AllOf",
+                "Value": ["encrypted_disk", "screen_lock_enabled"]
+              },
+              {
+                "Attribute": "resource.Tag:data_sensitivity",
+                "Operator": "StringLessThanOrEquals",
+                "Value": "{{user.max_data_clearance}}"
+              },
+              {
+                "Attribute": "time:Recurrence",
+                "Operator": "CronMatch",
+                "Value": "0 9-17 * * 1-5"
+              }
+            ]
+          },
+          "Effect": "Permit",
+          "Obligations": [
+            {
+              "Type": "Watermarking",
+              "Format": "kuva_watermark_v1"
+            },
+            {
+              "Type": "DataRetention",
+              "MaxDays": 90
+            }
+          ]
+        }
+      ]
+    }
+  ],
+
+  "GlobalObligations": {
+    "Logging": {
+      "MandatoryFields": [
+        "user.id",
+        "resource.id",
+        "action",
+        "decision",
+        "geo_location"
+      ],
+      "Destinations": [
+        {
+          "Type": "Splunk",
+          "Endpoint": "https://logs.kuva.ai:8088/services/collector",
+          "Token": "${SPLUNK_HEC_TOKEN}"
+        },
+        {
+          "Type": "S3",
+          "Bucket": "kuva-abac-audit-logs",
+          "Path": "raw/{{timestamp:yyyy/MM/dd}}"
+        }
+      ]
+    },
+    "RealtimeChecks": [
+      {
+        "Type": "ThreatIntelligence",
+        "API": "https://ti.kuva.ai/v1/check",
+        "Fields": ["user.ip", "device.id"]
+      }
+    ]
+  },
+
+  "PolicyVersionControl": {
+    "RollbackWindowDays": 30,
+    "ApprovalWorkflow": {
+      "Stages": [
+        {
+          "Approvers": ["security-architect"],
+          "Required": 1
+        },
+        {
+          "Approvers": ["compliance-officer"],
+          "Required": 1
+        }
+      ]
+    }
+  },
+
+  "ConditionFunctions": [
+    {
+      "Name": "TimeBetween",
+      "Logic": "Convert timezones and check if request time falls within range"
+    },
+    {
+      "Name": "CronMatch",
+      "Logic": "Validate against cron expression with timezone conversion"
+    },
+    {
+      "Name": "StringRegexMatch",
+      "Logic": "Full regex engine support with backtracking protection"
+    }
+  ],
+
+  "ComplianceMappings": [
+    {
+      "Standard": "GDPR",
+      "Controls": ["Art-25", "Art-32"],
+      "PolicyIds": ["KUVA-ABAC-001", "KUVA-ABAC-002"]
+    },
+    {
+      "Standard": "HIPAA",
+      "Controls": ["164.312(a)(1)", "164.312(e)(1)"],
+      "PolicyIds": ["KUVA-ABAC-003", "KUVA-ABAC-004"]
+    }
+  ]
+}
