@@ -1,0 +1,237 @@
+name: KUVA AI Release Pipeline
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release-type:
+        description: 'Release type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+          - rc
+      dry-run:
+        description: 'Test release without publishing'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  REGISTRIES: ghcr.io,docker.io
+  PYPI_REPO: https://upload.pypi.org/legacy/
+  HELM_REPO: https://charts.kuva.ai
+  SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+  SBOM_FORMAT: 'spdx@2.3'
+
+jobs:
+  calculate-version:
+    name: Determine Semantic Version
+    runs-on: ubuntu-latest
+    outputs:
+      semver: ${{ steps.version.outputs.new_version }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get Previous Tags
+        id: tags
+        uses: actions-ecosystem/action-get-merged-tag@v2
+        with:
+          pattern: 'v*'
+
+      - name: Generate Next Version
+        id: version
+        uses: mathieudutour/github-tag-action@v6
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          release_branches: main
+          initial_version: 0.1.0
+          tag_prefix: v
+          bump: ${{ inputs.release-type || 'auto' }}
+          dry_run: ${{ inputs.dry-run }}
+
+  verify-compliance:
+    name: Compliance Checks
+    runs-on: ubuntu-latest
+    needs: calculate-version
+    steps:
+      - name: Check License Dependencies
+        uses: licenser/action@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fail_on: GPL,AGPL
+          allow_osi_approved: true
+
+      - name: Third-party Audit
+        uses: snyk/actions/python@v3
+        with:
+          command: monitor
+          args: --org=kuva-ai --project-name=kuva-core
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+  build-artifacts:
+    name: Build & Sign
+    runs-on: ubuntu-latest
+    needs: verify-compliance
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+        include:
+          - platform: linux/amd64
+            arch: x86_64
+          - platform: linux/arm64
+            arch: aarch64
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.2.0'
+
+      - name: Build Docker Image
+        uses: docker/build-push-action@v5
+        id: build
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ needs.calculate-version.outputs.semver }}
+            ghcr.io/${{ github.repository }}:latest
+          sbom: ${{ env.SBOM_FORMAT }}
+          provenance: true
+          labels: |
+            org.opencontainers.image.version=${{ needs.calculate-version.outputs.semver }}
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Sign Container
+        if: ${{ !inputs.dry-run }}
+        run: |
+          cosign sign --key env://SIGNING_KEY \
+            ghcr.io/${{ github.repository }}:${{ needs.calculate-version.outputs.semver }}
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/${{ github.repository }}:${{ needs.calculate-version.outputs.semver }}
+          format: ${{ env.SBOM_FORMAT }}
+          output-file: sbom-${{ matrix.arch }}.spdx
+
+      - name: Upload Assets
+        uses: actions/upload-artifact@v3
+        with:
+          name: release-${{ matrix.arch }}
+          path: |
+            sbom-${{ matrix.arch }}.spdx
+            dist/*
+
+  publish:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs: [build-artifacts]
+    environment: production
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: release-${{ matrix.arch }}
+          path: artifacts
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@v1
+        with:
+          packages-dir: artifacts/dist/
+          repository-url: ${{ env.PYPI_REPO }}
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
+
+      - name: Publish Helm Chart
+        uses: helm/chart-releaser-action@v2
+        with:
+          charts_dir: charts/
+          chart_repo_url: ${{ env.HELM_REPO }}
+          cr_token: ${{ secrets.HELM_REPO_TOKEN }}
+          push: true
+
+      - name: Mirror to Docker Hub
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            docker.io/kuvaai/core:${{ needs.calculate-version.outputs.semver }}
+            docker.io/kuvaai/core:latest
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max
+
+      - name: Create GitHub Release
+        id: release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.calculate-version.outputs.semver }}
+          name: KUVA AI ${{ needs.calculate-version.outputs.semver }}
+          body: ${{ steps.changelog.outputs.changelog }}
+          discussion_category_name: 'Announcements'
+          generate_release_notes: true
+          artifacts: artifacts/*.spdx
+          prerelease: ${{ contains(needs.calculate-version.outputs.semver, '-rc') }}
+
+      - name: Notify Slack
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_RELEASE_WEBHOOK }}
+          SLACK_COLOR: good
+          SLACK_MESSAGE: "Released v${{ needs.calculate-version.outputs.semver }} - ${{ steps.release.outputs.html_url }}"
+          SLACK_TITLE: "New KUVA AI Release"
+          SLACK_USERNAME: Release Bot
+
+  post-release:
+    name: Post-Release Tasks
+    runs-on: ubuntu-latest
+    needs: publish
+    if: always()
+    steps:
+      - name: Update Documentation
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: docs/_build/html
+          keep_files: false
+
+      - name: Sync Mirror Registries
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.REGISTRY_MIRROR_HOST }}
+          username: ${{ secrets.REGISTRY_MIRROR_USER }}
+          key: ${{ secrets.REGISTRY_MIRROR_SSH_KEY }}
+          script: |
+            skopeo sync --src docker://ghcr.io/${{ github.repository }} \
+              --dest docker://registry.kuva.ai/${{ github.repository }}
+
+      - name: Cleanup Old Tags
+        uses: dev-drprasad/delete-old-tags@v2
+        with:
+          keep_latest: 10
+          older_than_days: 90
+          exclude_tags: latest,prod-*
+          delete_tag: true
