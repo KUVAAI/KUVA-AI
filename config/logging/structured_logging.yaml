@@ -1,0 +1,180 @@
+# config/logging/structured_logging.yaml
+
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  kuva_json:
+    class: pythonjsonlogger.jsonlogger.JsonFormatter
+    format: >-
+      %(asctime)s %(created)f %(filename)s %(funcName)s %(levelname)s %(levelno)s
+      %(lineno)d %(message)s %(module)s %(msecs)s %(name)s %(pathname)s %(process)d
+      %(processName)s %(relativeCreated)d %(thread)d %(threadName)s
+    datefmt: "%Y-%m-%dT%H:%M:%S%z"
+    rename_fields:
+      asctime: timestamp
+      levelname: severity
+      message: event
+    static_fields:
+      app: kuva_ai
+      environment: ${APP_ENV:-development}
+      component: ai_orchestrator
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: DEBUG
+    formatter: kuva_json
+    stream: ext://sys.stdout
+    filters: [debug_context]
+
+  file:
+    class: concurrent_log_handler.ConcurrentRotatingFileHandler
+    filename: /var/log/kuva/application.log
+    maxBytes: 104857600  # 100MB
+    backupCount: 10
+    encoding: utf-8
+    delay: false
+    formatter: kuva_json
+    level: INFO
+    filters: [prod_filter]
+    atomic_rotation: true
+
+  splunk_http:
+    class: splunk_handler.SplunkHandler
+    host: ${SPLUNK_HOST}
+    port: 8088
+    token: ${SPLUNK_HEC_TOKEN}
+    index: kuva_prod
+    sourcetype: _json
+    ssl: true
+    level: INFO
+    formatter: kuva_json
+    verify: /etc/ssl/certs/splunk_ca.pem
+    timeout: 15
+    retry_count: 5
+    retry_backoff: 2
+    filters: [splunk_ready]
+
+  prometheus:
+    class: prometheus_client.logging.PrometheusLogHandler
+    labels:
+      - app=kuva_ai
+      - component=ai_orchestrator
+    level: WARNING
+    formatter: kuva_json
+    error_buckets: [0.1, 0.5, 1.0, 5.0]
+    event_buckets: [1, 10, 100, 1000]
+
+  opensearch:
+    class: opensearch_logger.OpenSearchHandler
+    hosts:
+      - https://${OPENSEARCH_HOST}:9200
+    index_pattern: "kuva-{+YYYY.MM.dd}"
+    http_auth:
+      - ${OPENSEARCH_USER}
+      - ${OPENSEARCH_PASSWORD}
+    http_compress: true
+    use_ssl: true
+    verify_certs: true
+    ssl_assert_hostname: false
+    ssl_show_warn: false
+    timeout: 30
+    level: INFO
+    bulk_size: 1000
+    flush_interval: 5.0
+
+filters:
+  debug_context:
+    (): kuva.logging.filters.DebugContextFilter
+
+  prod_filter:
+    (): kuva.logging.filters.EnvironmentFilter
+    allowed_environments: [production, staging]
+
+  splunk_ready:
+    (): kuva.logging.filters.SplunkReadyFilter
+    required_fields:
+      - trace_id
+      - span_id
+      - correlation_id
+
+loggers:
+  kuva_core:
+    handlers: [console, file, splunk_http, opensearch, prometheus]
+    level: INFO
+    propagate: false
+
+  ai_agents:
+    handlers: [file, opensearch]
+    level: DEBUG
+    propagate: false
+    qualname: kuva.agents
+
+  security:
+    handlers: [file, splunk_http]
+    level: WARNING
+    propagate: false
+    qualname: kuva.security
+
+  performance:
+    handlers: [prometheus, opensearch]
+    level: INFO
+    propagate: false
+    qualname: kuva.performance
+
+root:
+  level: WARNING
+  handlers: [console]
+  propagate: true
+
+# === Advanced Configuration === 
+async_logging:
+  enabled: true
+  queue_size: 10000
+  overflow_behavior: block
+  worker_threads: 4
+
+log_context:
+  trace_id: ${TRACE_ID}
+  span_id: ${SPAN_ID}
+  correlation_id: ${CORRELATION_ID}
+  user_id: ${USER_ID:-anonymous}
+  session_id: ${SESSION_ID}
+
+log_encryption:
+  enabled: true
+  kms_key_id: alias/kuva_log_encryption
+  algorithm: AES256
+  context:
+    Environment: production
+    Component: logging
+
+log_retention:
+  days: 365
+  archive: s3://kuva-logs-archive-${APP_ENV}
+  glacier_transition_days: 30
+
+compliance:
+  pci:
+    mask_patterns:
+      - \b(?:4[0-9]{12}(?:[0-9]{3})?)\b  # Credit card numbers
+      - \b(?:3[47][0-9]{13})\b          # AMEX
+  hipaa:
+    mask_fields:
+      - patient_id
+      - medical_record_number
+      - prescription_info
+
+environment_overrides:
+  development:
+    handlers: [console]
+    level: DEBUG
+    async_logging: false
+    log_encryption: false
+
+  staging:
+    handlers: [console, file, opensearch]
+    level: INFO
+    log_retention:
+      days: 30
