@@ -1,0 +1,204 @@
+syntax = "proto3";
+
+package kuva.ai.v1;
+
+option go_package = "github.com/kuva-ai/proto/gen/go/kuva/ai/v1;healthv1";
+option java_multiple_files = true;
+option java_package = "ai.kuva.health.v1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "google/api/annotations.proto";
+import "protoc-gen-openapiv2/options/annotations.proto";
+
+// ========================
+// Core Health Status Types
+// ========================
+
+enum Status {
+  STATUS_UNKNOWN = 0;
+  SERVING = 1;
+  NOT_SERVING = 2;
+  DEGRADED = 3;
+  STARTING_UP = 4;
+  SHUTTING_DOWN = 5;
+  MAINTENANCE_MODE = 6;
+}
+
+message ComponentHealth {
+  string component_name = 1;
+  Status status = 2;
+  string error_code = 3;
+  google.protobuf.Timestamp last_healthy = 4;
+  google.protobuf.Duration response_time = 5;
+  map<string, string> metrics = 6; // e.g., "cpu_usage": "85%"
+}
+
+message DependencyStatus {
+  string service_name = 1;
+  bool connected = 2;
+  google.protobuf.Duration latency = 3;
+  string version = 4;
+  int32 retry_attempts = 5;
+}
+
+// ========================
+// Health Check Requests/Responses
+// ========================
+
+message HealthCheckRequest {
+  enum DetailLevel {
+    BASIC = 0;
+    STANDARD = 1;
+    VERBOSE = 2;
+    DEBUG = 3;
+  }
+  DetailLevel detail_level = 1;
+  repeated string component_filter = 2;
+}
+
+message HealthCheckResponse {
+  Status overall_status = 1;
+  google.protobuf.Timestamp check_time = 2;
+  repeated ComponentHealth components = 3;
+  repeated DependencyStatus dependencies = 4;
+  ResourceUsage resources = 5;
+  HealthHistory history = 6;
+}
+
+message ResourceUsage {
+  double cpu_percent = 1;
+  uint64 memory_used_mb = 2;
+  uint64 disk_used_gb = 3;
+  uint64 network_latency_ms = 4;
+  uint32 active_threads = 5;
+}
+
+message HealthHistory {
+  repeated HealthSnapshot snapshots = 1;
+  google.protobuf.Duration tracking_period = 2;
+}
+
+message HealthSnapshot {
+  Status status = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  string triggering_event = 3; // e.g., "high_memory_usage"
+}
+
+// ========================
+// Service Definition
+// ========================
+
+service HealthService {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse) {
+    option (google.api.http) = {
+      get: "/v1/health"
+    };
+    option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_operation) = {
+      summary: "System health status check"
+      tags: "Monitoring"
+    };
+  }
+  
+  rpc Watch(HealthCheckRequest) returns (stream HealthCheckResponse) {
+    option (google.api.http) = {
+      get: "/v1/health/watch"
+    };
+    option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_operation) = {
+      summary: "Realtime health monitoring stream"
+      tags: "Monitoring"
+    };
+  }
+}
+
+// ========================
+// Monitoring Integration
+// ========================
+
+message PrometheusMetrics {
+  repeated MetricFamily metrics = 1;
+}
+
+message MetricFamily {
+  string name = 1;
+  MetricType type = 2;
+  string help = 3;
+  repeated Metric metrics = 4;
+}
+
+message Metric {
+  repeated LabelPair labels = 1;
+  oneof value {
+    double gauge = 2;
+    uint64 counter = 3;
+    Histogram histogram = 4;
+  }
+  google.protobuf.Timestamp timestamp = 5;
+}
+
+message Histogram {
+  uint64 sample_count = 1;
+  double sample_sum = 2;
+  repeated Bucket buckets = 3;
+}
+
+message Bucket {
+  uint64 cumulative_count = 1;
+  double upper_bound = 2;
+}
+
+enum MetricType {
+  UNKNOWN = 0;
+  GAUGE = 1;
+  COUNTER = 2;
+  HISTOGRAM = 3;
+}
+
+// ========================
+// Security & Metadata
+// ========================
+
+message HealthMetadata {
+  string authorization = 1 [
+    (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_field) = {
+      description: "Bearer token"
+    }
+  ];
+  string client_version = 2;
+}
+
+// ========================
+// Error Reporting
+// ========================
+
+message HealthError {
+  string code = 1; // e.g., "DEPENDENCY_TIMEOUT"
+  string message = 2;
+  string severity = 3; // CRITICAL, WARNING, INFO
+  google.protobuf.Timestamp occurrence_time = 4;
+}
+
+// ========================
+// API Documentation
+// ========================
+
+option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_swagger) = {
+  info: {
+    title: "KUVA AI Health Check API";
+    version: "2.3";
+    description: "Enterprise health monitoring system with multi-level diagnostics";
+  };
+  schemes: HTTPS;
+  consumes: "application/json";
+  produces: "application/json";
+  security_definitions: {
+    security: {
+      key: "Bearer";
+      value: {
+        type: TYPE_API_KEY;
+        in: IN_HEADER;
+        name: "Authorization";
+      }
+    }
+  }
+};
