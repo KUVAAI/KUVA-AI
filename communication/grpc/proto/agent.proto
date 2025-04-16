@@ -1,0 +1,256 @@
+syntax = "proto3";
+
+package kuva.ai.v1;
+
+option go_package = "github.com/kuva-ai/proto/gen/go/kuva/ai/v1;agentv1";
+option java_multiple_files = true;
+option java_package = "ai.kuva.v1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+import "google/api/annotations.proto";
+import "google/api/field_behavior.proto";
+import "protoc-gen-openapiv2/options/annotations.proto";
+
+// ========================
+// Core Data Types
+// ========================
+
+message AgentConfig {
+  string agent_type = 1 [(google.api.field_behavior) = REQUIRED];
+  map<string, string> parameters = 2;
+  bytes custom_data = 3; // Serialized configuration
+}
+
+message AgentState {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_INITIALIZING = 1;
+    STATUS_READY = 2;
+    STATUS_BUSY = 3;
+    STATUS_ERROR = 4;
+    STATUS_TERMINATING = 5;
+  }
+  
+  string agent_id = 1;
+  Status status = 2;
+  google.protobuf.Timestamp created_at = 3;
+  google.protobuf.Timestamp modified_at = 4;
+  map<string, string> metrics = 5;
+  repeated string error_stack = 6;
+}
+
+message TaskRequest {
+  string agent_id = 1 [(google.api.field_behavior) = REQUIRED];
+  bytes payload = 2; // Protocol-agnostic task data
+  int32 priority = 3;
+  map<string, string> metadata = 4;
+}
+
+message TaskResponse {
+  string task_id = 1;
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_PENDING = 1;
+    STATUS_PROCESSING = 2;
+    STATUS_COMPLETED = 3;
+    STATUS_FAILED = 4;
+  }
+  Status status = 2;
+  bytes result = 3;
+  google.protobuf.Timestamp created_at = 4;
+  google.protobuf.Timestamp completed_at = 5;
+}
+
+// ========================
+// Service Definitions
+// ========================
+
+service AgentLifecycleService {
+  rpc CreateAgent(AgentConfig) returns (AgentState) {
+    option (google.api.http) = {
+      post: "/v1/agents"
+      body: "*"
+    };
+  }
+  
+  rpc UpdateAgent(AgentConfig) returns (AgentState) {
+    option (google.api.http) = {
+      patch: "/v1/agents/{agent_id}"
+      body: "*"
+    };
+  }
+  
+  rpc DeleteAgent(DeleteAgentRequest) returns (google.protobuf.Empty) {
+    option (google.api.http) = {
+      delete: "/v1/agents/{agent_id}"
+    };
+  }
+  
+  rpc GetAgentState(GetAgentStateRequest) returns (AgentState) {
+    option (google.api.http) = {
+      get: "/v1/agents/{agent_id}"
+    };
+  }
+}
+
+service TaskExecutionService {
+  rpc ExecuteTask(TaskRequest) returns (TaskResponse) {
+    option (google.api.http) = {
+      post: "/v1/tasks"
+      body: "*"
+    };
+  }
+  
+  rpc StreamTasks(stream TaskRequest) returns (stream TaskResponse) {
+    option (google.api.http) = {
+      post: "/v1/tasks/stream"
+      body: "*"
+    };
+  }
+  
+  rpc GetTaskStatus(GetTaskStatusRequest) returns (TaskResponse) {
+    option (google.api.http) = {
+      get: "/v1/tasks/{task_id}"
+    };
+  }
+}
+
+service MonitoringService {
+  rpc GetHealth(google.protobuf.Empty) returns (HealthStatus) {
+    option (google.api.http) = {
+      get: "/v1/health"
+    };
+  }
+  
+  rpc StreamMetrics(google.protobuf.Empty) returns (stream MetricData) {
+    option (google.api.http) = {
+      get: "/v1/metrics/stream"
+    };
+  }
+  
+  rpc GetDiagnostics(DiagnosticRequest) returns (DiagnosticReport) {
+    option (google.api.http) = {
+      post: "/v1/diagnostics"
+      body: "*"
+    };
+  }
+}
+
+// ========================
+// Supporting Messages
+// ========================
+
+message DeleteAgentRequest {
+  string agent_id = 1 [(google.api.field_behavior) = REQUIRED];
+  bool force = 2;
+}
+
+message GetAgentStateRequest {
+  string agent_id = 1 [(google.api.field_behavior) = REQUIRED];
+}
+
+message GetTaskStatusRequest {
+  string task_id = 1 [(google.api.field_behavior) = REQUIRED];
+}
+
+message HealthStatus {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_HEALTHY = 1;
+    STATUS_DEGRADED = 2;
+    STATUS_UNHEALTHY = 3;
+  }
+  Status status = 1;
+  map<string, string> components = 2;
+}
+
+message MetricData {
+  string metric_name = 1;
+  oneof value {
+    double double_value = 2;
+    int64 int_value = 3;
+    string string_value = 4;
+  }
+  google.protobuf.Timestamp timestamp = 5;
+  map<string, string> labels = 6;
+}
+
+message DiagnosticRequest {
+  enum Level {
+    LEVEL_UNSPECIFIED = 0;
+    LEVEL_BASIC = 1;
+    LEVEL_DETAILED = 2;
+    LEVEL_DEBUG = 3;
+  }
+  Level level = 1;
+  repeated string components = 2;
+}
+
+message DiagnosticReport {
+  string report_id = 1;
+  google.protobuf.Timestamp generated_at = 2;
+  bytes report_data = 3; // Structured data (JSON/protobuf)
+}
+
+// ========================
+// Error Handling
+// ========================
+
+message ErrorDetail {
+  string code = 1;
+  string message = 2;
+  string target = 3;
+  repeated ErrorDetail details = 4;
+}
+
+// ========================
+// Security
+// ========================
+
+message AuthMetadata {
+  string authorization = 1 [
+    (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_field) = {
+      description: "Bearer token"
+    }
+  ];
+}
+
+// ========================
+// API Annotations
+// ========================
+
+option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_swagger) = {
+  info: {
+    title: "KUVA AI Agent API";
+    version: "1.0";
+    contact: {
+      name: "KUVA AI Support";
+      url: "https://support.kuva.ai";
+      email: "api@kuva.ai";
+    };
+    license: {
+      name: "Commercial";
+      url: "https://kuva.ai/license";
+    };
+  };
+  schemes: HTTPS;
+  consumes: "application/json";
+  produces: "application/json";
+  security_definitions: {
+    security: {
+      key: "Bearer";
+      value: {
+        type: TYPE_API_KEY;
+        in: IN_HEADER;
+        name: "Authorization";
+      }
+    }
+  }
+  security: {
+    security_requirement: {
+      key: "Bearer";
+      value: {};
+    }
+  }
+};
