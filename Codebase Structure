@@ -1,0 +1,183 @@
+kuva-ai/
+├── .github/                         # GitHub Automation
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.md           # Template for bug reports
+│   │   └── feature_request.md      # Template for feature requests
+│   ├── workflows/
+│   │   ├── ci-cd.yml               # CI/CD Pipeline (Test -> Build -> Deploy)
+│   │   ├── security-scan.yml       # OWASP ZAP + Trivy scans
+│   │   └── release.yml             # Semantic versioning + GH Releases
+│   └── dependabot.yml              # Auto-update dependencies
+│
+├── config/                         # Environment Configuration
+│   ├── environments/
+│   │   ├── dev.env                # Development environment variables
+│   │   ├── staging.env            # Staging environment
+│   │   └── prod.env               # Production (encrypted via SOPS)
+│   ├── logging/
+│   │   ├── structured_logging.yaml # JSON logging config
+│   │   └── loki_pipeline.yaml      # Loki log aggregation
+│   └── policies/
+│       ├── abac_policies.json      # Attribute-based access policies
+│       └── data_retention.hcl      # Compliance retention rules
+│
+├── src/
+│   └── kuva/
+│       ├── core/                   # Core Framework
+│       │   ├── agent/
+│       │   │   ├── base.py         # AbstractAgent base class
+│       │   │   ├── factory.py      # AgentFactory (prototype pattern)
+│       │   │   ├── registry.py     # Service discovery registry
+│       │   │   └── lifecycle.py    # Agent state machine (init→ready→terminated)
+│       │   ├── orchestration/
+│       │   │   ├── scheduler/
+│       │   │   │   ├── reinforcement/
+│       │   │   │   │   ├── policy_network.py  # PyTorch RL policy
+│       │   │   │   │   └── reward_calculator.py # Custom reward functions
+│       │   │   │   └── graph_based/
+│       │   │   │       ├── gnn_model.py      # DGL-based GNN
+│       │   │   │       └── topology_manager.py # Dynamic resource graphs
+│       │   │   ├── workflow/
+│       │   │   │   ├── parser.py   # YAML→DAG parser
+│       │   │   │   ├── validator.py # Cyclic dependency checks
+│       │   │   │   └── optimizer/ # Cost-aware scheduling
+│       │   │   │       ├── genetic_algorithm.py
+│       │   │   │       └── simulated_annealing.py
+│       │   │   └── api/
+│       │   │       ├── graphql/    # Apollo Federation schema
+│       │   │       └── rest.py     # FastAPI endpoints
+│       │   ├── communication/
+│       │   │   ├── grpc/
+│       │   │   │   ├── proto/      # Protocol Buffer definitions
+│       │   │   │   │   ├── agent.proto
+│       │   │   │   │   └── healthcheck.proto
+│       │   │   │   ├── server.py   # Async gRPC server
+│       │   │   │   └── client_pool.py # Connection pooling
+│       │   │   └── event_stream/
+│       │   │       ├── kafka/      # Kafka producer/consumer
+│       │   │       │   ├── producer.py
+│       │   │       │   └── consumer_group.py
+│       │   │       └── nats/       # NATS JetStream implementation
+│       │   │           ├── publisher.py
+│       │   │           └── subscriber.py
+│       │   └── knowledge/          # Shared knowledge graph
+│       │       ├── rdf_store.py    # RDF triplestore integration
+│       │       └── ontology.py     # Domain-specific ontology
+│       │
+│       ├── security/
+│       │   ├── authn_authz/
+│       │   │   ├── zta_engine.py   # Zero-Trust Engine (SPIFFE/SPIRE)
+│       │   │   ├── oidc_provider.py # Keycloak integration
+│       │   │   └── policy_enforcer.py # OPA Rego policies
+│       │   ├── crypto/
+│       │   │   ├── tdf.py          # OpenTDF client
+│       │   │   ├── vault.py        # HashiCorp Vault secrets engine
+│       │   │   └── kmip_client.py   # KMIP-compliant key management
+│       │   └── audit/
+│       │       ├── auditor.py      # Audit log generator
+│       │       └── syslog_handler.py # CEF format logging
+│       │
+│       ├── observability/
+│       │   ├── metrics/
+│       │   │   ├── prometheus.py  # Custom collectors
+│       │   │   └── statsd.py      # StatsD emitter
+│       │   ├── tracing/
+│       │   │   ├── otel.py         # OpenTelemetry instrumentation
+│       │   │   └── xray.py         # AWS X-Ray integration
+│       │   └── logging/
+│       │       ├── structured.py   # structlog configuration
+│       │       └── fluentd.py     # Fluentd forwarder
+│       │
+│       ├── infrastructure/
+│       │   ├── kubernetes/         # K8s operator
+│       │   │   ├── crd/            # Custom Resource Definitions
+│       │   │   ├── operator.py     # Controller logic
+│       │   │   └── helm_chart/     # Helm template generator
+│       │   └── cloud/
+│       │       ├── aws/
+│       │       │   ├── eks.py      # EKS cluster manager
+│       │       │   └── sagemaker.py # SageMaker integration
+│       │       └── azure/
+│       │           ├── aks.py      # AKS cluster operations
+│       │           └── synapse.py  # Synapse Analytics integration
+│       │
+│       └── cli/                    # Command-line interface
+│           ├── commands/
+│           │   ├── deploy.py       # Deployment commands
+│           │   ├── monitor.py      # Real-time monitoring
+│           │   └── diagnose.py     # Diagnostic toolkit
+│           └── main.py             # CLI entrypoint (Typer)
+│
+├── tests/
+│   ├── unit/                       # Unit tests (pytest)
+│   │   ├── core/
+│   │   │   ├── test_agent_lifecycle.py
+│   │   │   └── test_scheduler_algorithms.py
+│   │   └── security/
+│   │       ├── test_zta_policies.py
+│   │       └── test_encryption.py
+│   ├── integration/               # Docker-compose based tests
+│   │   ├── test_grpc_throughput.py
+│   │   └── test_kafka_failover.py
+│   ├── performance/               # Load testing
+│   │   ├── locustfile.py          # Locust scenarios
+│   │   └── k6/                   # k6 test scripts
+│   │       ├── stress_test.js
+│   │       └── longevity_test.js
+│   └── security/                 # Security tests
+│       ├── zap_scan.py            # OWASP ZAP automation
+│       └── fuzzing/              # AFL++ fuzzing targets
+│           ├── grpc_fuzzer.py
+│           └── api_fuzzer.py
+│
+├── infra/
+│   ├── docker/
+│   │   ├── base.Dockerfile        # Minimal Python base image
+│   │   ├── agent.Dockerfile       # Agent-specific build
+│   │   └── grpc-gateway.Dockerfile # Envoy proxy
+│   ├── terraform/                # Multi-cloud IaC
+│   │   ├── modules/
+│   │   │   ├── networking/       # VPC/peering configs
+│   │   │   └── kubernetes/       # K8s cluster modules
+│   │   ├── aws/
+│   │   │   ├── main.tf           # EKS + RDS + ElastiCache
+│   │   │   └── variables.tf
+│   │   └── azure/
+│   │       ├── main.tf           # AKS + CosmosDB
+│   │       └── outputs.tf
+│   └── helm/
+│       ├── kuva-core/            # Core services chart
+│       │   ├── Chart.yaml
+│       │   ├── values.yaml
+│       │   └── templates/
+│       │       ├── deployment.yaml
+│       │       └── service.yaml
+│       └── kuva-agents/          # Agent pool chart
+│           ├── Chart.yaml
+│           └── values.yaml
+│
+├── docs/
+│   ├── architecture/             # Architectural Decision Records
+│   │   ├── ADR-001-agent-comm.md # gRPC vs REST decision
+│   │   └── ADR-002-authz.md      # OPA vs Casbin comparison
+│   ├── api/
+│   │   ├── openapi.yaml          # Swagger/OpenAPI 3.0 spec
+│   │   └── asyncapi.yaml         # Event-driven API spec
+│   └── operations/              # SRE playbooks
+│       ├── incident_response.md
+│       └── capacity_planning.md
+│
+├── scripts/
+│   ├── deploy/                   # Deployment helpers
+│   │   ├── bootstrap_cluster.sh # K8s cluster init
+│   │   └── rolling_update.py     # Zero-downtime deploy
+│   └── security/
+│       ├── generate_certs.sh     # mTLS certificate generation
+│       └── rotate_keys.py        # Key rotation automation
+│
+├── pyproject.toml                # PEP 621 config
+├── poetry.lock                   # Dependency locks
+├── Makefile                      # Developer shortcuts
+├── Dockerfile                    # Main service image
+├── .pre-commit-config.yaml       # Git hooks
+└── README.md                     # Project overview + badges
