@@ -1,0 +1,228 @@
+name: KUVA AI Security Scanning
+
+on:
+  push:
+    branches: [main, release/*]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 0 * * 1' # Weekly scans
+
+jobs:
+  dependency-scan:
+    name: Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Snyk Open Source Scan
+        uses: snyk/actions/python@v3
+        with:
+          command: test
+          args: |
+            --severity-threshold=high 
+            --fail-on=upgradable 
+            --scan-all-unmanaged 
+            --json-file-output=snyk_results.json
+          version: v1.1294.0
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Snyk License Compliance
+        uses: snyk/actions/python@v3
+        with:
+          command: test
+          args: |
+            --severity-threshold=medium 
+            --fail-on=licenses 
+            --license-issues
+          version: v1.1294.0
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Upload SARIF Report
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: snyk_results.json
+
+  container-scan:
+    name: Container & IaC Security
+    runs-on: ubuntu-latest
+    needs: dependency-scan
+    strategy:
+      matrix:
+        scan_type: [container, filesystem, config]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Trivy Security Scan
+        uses: aquasecurity/trivy-action@0.13
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          format: 'template'
+          template: "@/contrib/sarif.tpl"
+          output: trivy-${{ matrix.scan_type }}-results.sarif
+          severity: 'HIGH,CRITICAL'
+          scanners: |
+            ${{ matrix.scan_type == 'container' && 'vuln,config,secret' || '' }}
+            ${{ matrix.scan_type == 'filesystem' && 'fs,secret' || '' }}
+            ${{ matrix.scan_type == 'config' && 'config' || '' }}
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          exit-code: 0
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: trivy-${{ matrix.scan_type }}-results.sarif
+
+  secrets-detection:
+    name: Secrets & Credentials Detection
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: TruffleHog Scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          args: |
+            --regex 
+            --entropy=False 
+            --max_depth=5000 
+            --no-verification 
+            --fail high 
+            --format sarif 
+            --output trufflehog-results.sarif
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: trufflehog-results.sarif
+
+  iac-scan:
+    name: Infrastructure as Code Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Terraform Security Scan
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: infra/terraform
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov-results.sarif
+          soft_fail: false
+          skip_check: CKV_AWS_8,CKV_AWS_19 # Example exclusions
+
+      - name: Kubernetes Manifest Scan
+        uses: aquasecurity/trivy-action@0.13
+        with:
+          scan-type: config
+          scan-ref: infra/kubernetes/
+          format: sarif
+          output: trivy-k8s-results.sarif
+          security-checks: config
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: |
+            checkov-results.sarif
+            trivy-k8s-results.sarif
+
+  app-scan:
+    name: Application Security Testing
+    runs-on: ubuntu-latest
+    needs: [container-scan, iac-scan]
+    services:
+      zap:
+        image: owasp/zap2docker-stable:latest
+        ports:
+          - 8080:8080
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: OWASP ZAP Baseline Scan
+        run: |
+          docker run --rm \
+            -v $(pwd):/zap/wrk \
+            -t owasp/zap2docker-stable:latest \
+            zap-baseline.py \
+            -t http://zap:8080 \
+            -r zap-report.html \
+            -x zap-report.xml \
+            -J zap-report.json \
+            -c config/zap.conf
+
+      - name: Convert to SARIF
+        uses: github/sarif-upload@v2
+        with:
+          tool: OWASP ZAP
+          path: zap-report.xml
+          sarif-file: zap-results.sarif
+
+      - name: Upload Results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: zap-results.sarif
+
+  security-gates:
+    name: Security Enforcement
+    runs-on: ubuntu-latest
+    needs: 
+      - dependency-scan
+      - container-scan 
+      - secrets-detection
+      - iac-scan
+      - app-scan
+    steps:
+      - name: Aggregate Vulnerabilities
+        uses: advanced-security/aggregate-sarif-reports@v1
+        with:
+          sarif_files: |
+            snyk_results.json
+            trivy-*-results.sarif
+            trufflehog-results.sarif
+            checkov-results.sarif
+            zap-results.sarif
+
+      - name: Fail on Critical Issues
+        uses: advanced-security/fail-on-critical@v2
+        with:
+          severity: critical
+          sarif_file: aggregated-results.sarif
+
+      - name: Create Security Dashboard
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: aggregated-results.sarif
+          category: security-scan
+
+      - name: Slack Alert
+        if: failure()
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_SECURITY_WEBHOOK }}
+          SLACK_COLOR: danger
+          SLACK_MESSAGE: "Critical security issues detected in ${{ github.ref }}"
+          SLACK_TITLE: "Security Scan Failed"
+          SLACK_USERNAME: Security Bot
