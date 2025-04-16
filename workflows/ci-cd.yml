@@ -1,0 +1,252 @@
+name: KUVA AI CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - release/*
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main]
+
+env:
+  DOCKER_REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  KUBE_NAMESPACE: kuva-${{ github.event_name == 'pull_request' && 'pr' || 'prod' }}
+  HELM_CHART_DIR: infra/helm/kuva-core
+  TERRAFORM_DIR: infra/terraform
+
+jobs:
+  code-quality:
+    name: Code Quality & Security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Code Linting
+        run: |
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          black --check --diff .
+
+      - name: Static Analysis
+        uses: sonarsource/sonarqube-scan@v1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
+        with:
+          args: >
+            -Dsonar.projectKey=kuva-ai
+            -Dsonar.python.coverage.reportPaths=coverage.xml
+            -Dsonar.exclusions=**/tests/**,**/migrations/**
+
+      - name: Unit Tests & Coverage
+        run: |
+          pytest --cov=kuva --cov-report=xml --junitxml=junit.xml
+        env:
+          KUVA_ENV: test
+
+      - name: Upload Coverage
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    needs: code-quality
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Dependency Vulnerability Scan
+        uses: snyk/actions/python@v3
+        with:
+          command: test
+          args: --severity-threshold=high --fail-on=upgradable
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Container Scan
+        uses: aquasecurity/trivy-action@0.13
+        with:
+          image-ref: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          format: 'template'
+          template: "@/contrib/sarif.tpl"
+          output: trivy-results.sarif
+          severity: 'HIGH,CRITICAL'
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: trivy-results.sarif
+
+  build-multiarch:
+    name: Build Multi-Arch Containers
+    runs-on: ubuntu-latest
+    needs: security-scan
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          tags: |
+            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          push: ${{ github.ref == 'refs/heads/main' }}
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build-multiarch
+    environment: staging
+    concurrency: staging
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.14.2'
+
+      - name: Deploy Kubernetes
+        uses: azure/k8s-deploy@v4
+        with:
+          namespace: ${{ env.KUBE_NAMESPACE }}
+          manifests: ${{ env.HELM_CHART_DIR }}
+          images: |
+            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          strategy: canary
+          traffic-split-method: smi
+          helm-version: '3.14.2'
+
+      - name: Run Integration Tests
+        uses: stefanprodan/podman-actions/healthcheck@v1
+        with:
+          image: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          tests: |
+            pytest tests/integration --junitxml=integration.xml
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v3
+        with:
+          name: integration-test-results
+          path: integration.xml
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment: production
+    concurrency: production
+    permissions:
+      contents: read
+      deployments: write
+      checks: write
+      security-events: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Validate Infrastructure
+        uses: hashicorp/terraform-github-actions@v2
+        with:
+          tf_actions_version: 1.6.2
+          tf_actions_subcommand: validate
+          tf_actions_working_dir: ${{ env.TERRAFORM_DIR }}
+
+      - name: Deploy Production
+        uses: azure/k8s-deploy@v4
+        env:
+          KUBECONFIG: ${{ secrets.PROD_KUBECONFIG }}
+        with:
+          namespace: kuva-prod
+          manifests: ${{ env.HELM_CHART_DIR }}/values-prod.yaml
+          images: |
+            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          strategy: blue-green
+          helm-version: '3.14.2'
+          helm-values: |
+            global:
+              monitoring: true
+              security:
+                vaultEnabled: true
+
+      - name: Post-Deployment Scan
+        uses: owasp/zap-full-scan@v1
+        with:
+          target: https://kuva-api.prod.example.com
+          rules: 
+            - active-scan
+            - ascanrules
+          risk: 3
+          container-name: zap-scanner
+
+      - name: Rollback on Failure
+        if: ${{ failure() }}
+        uses: azure/k8s-rollout@v1
+        with:
+          namespace: kuva-prod
+          action: rollback
+          deployment: kuva-core
+
+  notify:
+    name: Notification
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: always()
+    steps:
+      - name: Slack Notification
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_CI_WEBHOOK }}
+          SLACK_COLOR: ${{ job.status == 'success' && 'good' || 'danger' }}
+          SLACK_MESSAGE: "Deployment ${{ job.status }} for ${{ github.ref }}"
+          SLACK_TITLE: "KUVA AI CI/CD Result"
+          SLACK_USERNAME: GitHub Actions
+
+      - name: Update Status Dashboard
+        uses: apiaryio/statuspage-actions@v1
+        with:
+          pageId: ${{ secrets.STATUSPAGE_PAGE_ID }}
+          componentId: ${{ secrets.STATUSPAGE_COMPONENT_ID }}
+          status: ${{ job.status == 'success' && 'operational' || 'major_outage' }}
+        env:
+          STATUSPAGE_API_KEY: ${{ secrets.STATUSPAGE_API_KEY }}
