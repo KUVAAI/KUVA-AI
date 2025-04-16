@@ -1,0 +1,281 @@
+# config/logging/loki_pipeline.yaml
+
+auth_enabled: true
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9095
+  http_server_read_timeout: 5m
+  http_server_write_timeout: 5m
+  log_level: warn
+
+common:
+  path_prefix: /var/loki
+  storage:
+    s3:
+      s3: s3://${AWS_REGION}.amazonaws.com
+      bucketnames: kuva-ai-logs-${ENVIRONMENT}
+      access_key_id: ${AWS_ACCESS_KEY_ID}
+      secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+      s3forcepathstyle: true
+      insecure: false
+      sse_encryption: true
+      sse_kms_key_id: alias/kuva_logs_kms
+  replication_factor: 3
+  ring:
+    kvstore:
+      store: memberlist
+    heartbeat_timeout: 15m
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: boltdb-shipper
+      object_store: s3
+      schema: v12
+      index:
+        prefix: loki_index_
+        period: 24h
+
+storage_config:
+  aws:
+    s3: s3://${AWS_REGION}.amazonaws.com
+    bucket-name: kuva-ai-loki-chunks-${ENVIRONMENT}
+    dynamodb:
+      dynamodb_url: dynamodb://${AWS_REGION}.amazonaws.com
+      table_name: kuva_loki_index
+      use_periodic_tables: true
+      period: 168h
+  boltdb_shipper:
+    active_index_directory: /var/loki/boltdb-shipper-active
+    cache_location: /var/loki/boltdb-shipper-cache
+    shared_store: s3
+    resync_interval: 5m
+
+compactor:
+  working_directory: /var/loki/compactor
+  shared_store: s3
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 10
+
+ingester:
+  lifecycler:
+    ring:
+      kvstore:
+        store: memberlist
+      replication_factor: 3
+      heartbeat_timeout: 15m
+    final_sleep: 0s
+  chunk_idle_period: 30m
+  max_chunk_age: 2h
+  chunk_target_size: 1572864  # 1.5MB
+  chunk_retain_period: 30s
+  wal:
+    enabled: true
+    dir: /var/loki/wal
+    flush_interval: 15m
+
+limits_config:
+  ingestion_rate_mb: 50
+  ingestion_burst_size_mb: 100
+  max_streams_per_user: 10000
+  max_global_streams_per_user: 100000
+  max_line_size: 256000  # 256KB
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+  per_stream_rate_limit: 10MB
+  retention_period: 720h  # 30 days
+
+ruler:
+  storage:
+    s3:
+      bucketnames: kuva-ai-loki-rules-${ENVIRONMENT}
+  alertmanager_url: http://alertmanager:9093
+  enable_api: true
+  enable_alertmanager_v2: true
+  ring:
+    kvstore:
+      store: memberlist
+
+analytics:
+  reporting_enabled: false
+
+query_range:
+  align_queries_with_step: true
+  max_retries: 5
+  cache_results: true
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 1024
+        ttl: 24h
+
+frontend:
+  max_outstanding_per_tenant: 4096
+  querier_idle_ttl: 1h
+  log_queries_longer_than: 10s
+
+table_manager:
+  retention_deletes_enabled: true
+  retention_period: 720h  # 30 days
+  periodic_table_grace_period: 24h
+
+# === Log Ingestion Pipeline ===
+log_ingester_config:
+  client:
+    url: http://loki:3100/loki/api/v1/push
+    tenant_id: ${LOG_TENANT}
+    batchwait: 5s
+    batchsize: 1048576  # 1MB
+    timeout: 30s
+    backoff_config:
+      min_period: 100ms
+      max_period: 10s
+      max_retries: 10
+
+  positions:
+    filename: /var/log/positions.yaml
+
+  scrape_configs:
+    - job_name: kuva_app
+      static_configs:
+        - targets:
+            - localhost
+          labels:
+            job: kuva_ai
+            app: ${APP_NAME}
+            env: ${ENVIRONMENT}
+            component: ai_orchestrator
+      pipeline_stages:
+        - docker: {}
+        - regex:
+            expression: '^(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d+Z) (?P<level>\w+) (?P<message>.*)$'
+        - labels:
+            level: ""
+        - timestamp:
+            source: timestamp
+            format: RFC3339Nano
+        - output:
+            source: message
+
+    - job_name: kuva_audit
+      static_configs:
+        - targets:
+            - localhost
+          labels:
+            job: kuva_audit
+            type: security
+      pipeline_stages:
+        - json:
+            expressions:
+              user: user_id
+              action: event_type
+        - labels:
+            user: ""
+            action: ""
+        - drop:
+            expression: ".*sensitive.*"
+            drop_counter_reason: "redact_sensitive_data"
+
+# === Alerting Rules ===
+alerting_rules.yml: |
+  groups:
+    - name: kuva-ai-errors
+      rules:
+        - alert: HighErrorRate
+          expr: |
+            sum(rate({job="kuva_ai"} |~ "ERROR|FATAL" [5m])) by (component)
+            /
+            sum(rate({job="kuva_ai"}[5m])) by (component)
+            > 0.05
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "High error rate detected in {{ $labels.component }}"
+            runbook: "https://ops.kuva.ai/runbooks/high-error-rate"
+
+        - alert: LogIngestionFailure
+          expr: |
+            rate(loki_log_messages_total{status="fail"}[10m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            description: "Log ingestion failures detected in Loki pipeline"
+
+# === Security Hardening ===
+tls_config:
+  cert_file: /etc/ssl/certs/loki.crt
+  key_file: /etc/ssl/private/loki.key
+  client_auth_type: RequireAndVerifyClientCert
+  client_ca_file: /etc/ssl/certs/ca.pem
+
+audit_log:
+  enabled: true
+  path: /var/log/loki_audit.log
+  format: json
+
+multi_tenant:
+  enabled: true
+  authentication:
+    type: oidc
+    oidc:
+      issuer: https://auth.kuva.ai
+      clientID: loki-ingester
+      groupsClaim: groups
+      redirectURL: https://loki.kuva.ai/oidc/callback
+
+# === Performance Tuning ===
+caching:
+  index_queries_cache_config:
+    embedded_cache:
+      enabled: true
+      max_size_mb: 2048
+      ttl: 24h
+  query_range:
+    cache_results: true
+    split_queries_by_interval: 6h
+
+sharding:
+  index_queries_downsample_threshold: 100000
+  max_concurrent_shards: 128
+  split_queries_by_interval: 1h
+
+# === Backup & DR ===
+backup_config:
+  enabled: true
+  interval: 24h
+  s3:
+    bucket: kuva-ai-loki-backups-${ENVIRONMENT}
+    region: ${AWS_REGION}
+  retention: 30d
+  encryption: aws:kms
+
+# === Monitoring & Metrics ===
+monitoring:
+  self_monitoring: true
+  disable_pipeline_metrics: false
+  instance_metrics:
+    enabled: true
+    interval: 1m
+  process_metrics:
+    enabled: true
+    interval: 15s
+
+# === Enterprise Features ===
+enterprise:
+  license:
+    file: /etc/loki/license.lic
+  reporting:
+    usage_stats:
+      enabled: true
+      url: https://telemetry.kuva.ai/v1/usage
+  compliance:
+    export_controls:
+      enabled: true
+      allowed_countries: [US,CA,EU]
+    data_retention_auditing: true
